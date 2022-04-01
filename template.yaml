@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Civic Stack
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  CivicApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      EndpointConfiguration: REGIONAL
+      StageName: prod
+      Cors:
+        AllowMethods: "'POST'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+    Auth:
+      UsagePlan:
+      CreateUsagePlan: PER_API
+      Description: Usage plan for this API
+      Quota:
+        Limit: 500
+        Period: MONTH
+      Throttle:
+        BurstLimit: 100
+        RateLimit: 50
+
+  CivicKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for encrypting and decrypting
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: civic-key
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: Allow administration of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/KevinLaptop
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: Allow use of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/KevinLaptop
+            Action:
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+            Resource: "*"
+
+  DecisionDataStore:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: decisions
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  PIIDataStore:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: pii
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  CivicGateway:
+    Type: AWS::Serverless::Function
+    Properties:
+      Environment:
+        Variables:
+          CIVIC_KEY: !Ref CivicKey
+      CodeUri: functions/civic-gateway/
+      Handler: app.handler
+      Runtime: nodejs12.x
+      Policies:
+        - KMSEncryptPolicy:
+            KeyId: !Ref CivicKey
+        - KMSDecryptPolicy:
+            KeyId: !Ref CivicKey
+        - Statement:
+            - Effect: Allow
+              Resource: "*"
+              Action:
+                - events:PutEvents
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - arn:aws:dynamodb:*:*:table/decisions
+      Events:
+        validationRequest:
+          Type: Api
+          Properties:
+            Path: /
+            Method: POST
+            RestApiId: !Ref CivicApi
+        statusRequest:
+          Type: Api
+          Properties:
+            Path: /
+            Method: GET
+            RestApiId: !Ref CivicApi
+        deletionRequest:
+          Type: Api
+          Properties:
+            Path: /
+            Method: DELETE
+            RestApiId: !Ref CivicApi
+
+  CivicValidator:
+    Type: AWS::Serverless::Function
+    Properties:
+      Environment:
+        Variables:
+          CIVIC_KEY: !Ref CivicKey
+      CodeUri: functions/civic-validator/
+      Handler: app.handler
+      Runtime: nodejs12.x
+      Policies:
+        - KMSEncryptPolicy:
+            KeyId: !Ref CivicKey
+        - KMSDecryptPolicy:
+            KeyId: !Ref CivicKey
+        - Statement:
+            - Effect: Allow
+              Resource: "*"
+              Action:
+                - events:PutEvents
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource:
+                - arn:aws:dynamodb:*:*:table/decisions
+
+  CivicAnalytics:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/civic-analytics/
+      Handler: app.handler
+      Runtime: nodejs12.x
+      Policies:
+        - KMSDecryptPolicy:
+            KeyId: !Ref CivicKey
+        - Statement:
+            - Effect: Allow
+              Resource: "*"
+              Action:
+                - events:PutEvents
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+              Resource:
+                - arn:aws:dynamodb:*:*:table/decisions
+                - arn:aws:dynamodb:*:*:table/pii
+
+  CivicPIIStorage:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/civic-pii-storage/
+      Handler: app.handler
+      Runtime: nodejs12.x
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Resource: "*"
+              Action:
+                - events:PutEvents
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+              Resource:
+                - arn:aws:dynamodb:*:*:table/pii
+
+  ValidationRequestEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Forwards ValidationRequests to appropriate services"
+      EventPattern:
+        source:
+          - "civic.gateway"
+        detail-type:
+          - "ValidationRequest"
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - "CivicValidator"
+              - "Arn"
+          Id: "CivicValidatorTarget"
+        - Arn:
+            Fn::GetAtt:
+              - "CivicPIIStorage"
+              - "Arn"
+          Id: "CivicPIIStorageTarget"
+        - Arn:
+            Fn::GetAtt:
+              - "CivicAnalytics"
+              - "Arn"
+          Id: "CivicAnalyticsTarget"
+
+  ValidationResultEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Forwards ValidationResults to appropriate services"
+      EventPattern:
+        source:
+          - "civic.validator"
+        detail-type:
+          - "ValidationResult"
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - "CivicAnalytics"
+              - "Arn"
+          Id: "CivicAnalyticsTarget"
+
+  DeletionRequestEventrule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Forwards DeletionRequest to appropriate services"
+      EventPattern:
+        source:
+          - "civic.gateway"
+        detail-type:
+          - "DeletionRequest"
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - "CivicValidator"
+              - "Arn"
+          Id: "CivicValidatorTarget"
+        - Arn:
+            Fn::GetAtt:
+              - "CivicPIIStorage"
+              - "Arn"
+          Id: "CivicPIIStorageTarget"
+
+  DataStoredEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Forwards DataStored to appropriate services"
+      EventPattern:
+        source:
+          - "civic.pii-storage"
+        detail-type:
+          - "DataStored"
+      State: "ENABLED"
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - "CivicAnalytics"
+              - "Arn"
+          Id: "CivicAnalyticsTarget"
+
+  InvokeValidatorPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: "CivicValidator"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+
+  InvokePIIStoragePermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: "CivicPIIStorage"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+
+  InvokeAnalyticsPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: "CivicAnalytics"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+
+Outputs:
+  CivicApi:
+    Description: "Civic API url"
+    Value: !Sub "https://${CivicApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+  CivicGatewayFunction:
+    Description: "CivicGateway Function ARN"
+    Value: !GetAtt CivicGateway.Arn
+  CivicValidatorFunction:
+    Description: "CivicValidator Function ARN"
+    Value: !GetAtt CivicValidator.Arn
+  CivicPIIStorageFunction:
+    Description: "CivicPIIStorage Function ARN"
+    Value: !GetAtt CivicPIIStorage.Arn
+  CivicAnalyticsFunction:
+    Description: "CivicAnalytics Function ARN"
+    Value: !GetAtt CivicAnalytics.Arn
