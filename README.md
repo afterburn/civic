@@ -1,6 +1,11 @@
 # Civic Architect Challenge
 This repository contains all the assets I've created for the Civic Architect Challenge.
 
+## Challenge
+In this challenge you will have to design and build a system for handling sensitive user data. It
+requires designing a cloud-based microservice solution, and optionally setting up cloud
+infrastructure as well as some coding.
+
 ## Where can I test the result?
 https://0bhqi3.csb.app/
 
