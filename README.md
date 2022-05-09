@@ -3,9 +3,6 @@ In this challenge you will have to design and build a system for handling sensit
 requires designing a cloud-based microservice solution, and optionally setting up cloud
 infrastructure as well as some coding.
 
-## Where can I test the result?
-https://0bhqi3.csb.app/
-
 ## Also see
 For this challenge I did not write the cleanest, most optimized code.<br/>
 Feel free to checkout other assessments I did over the years to get a better picture of how I write code:
